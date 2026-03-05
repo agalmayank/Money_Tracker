@@ -113,6 +113,22 @@ body{padding-top:env(safe-area-inset-top)}
 .storage-row:last-child{border-bottom:none}
 .storage-label{color:#888}
 .storage-value{color:#f0ede8;font-weight:600;text-align:right;max-width:60%}
+/* ── Save status bar ── */
+#save-bar{background:#12121c;border-bottom:1px solid #1e1e2e;padding:5px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0}
+.save-status{font-size:11px;display:flex;align-items:center;gap:5px;color:#888}
+.save-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:#4caf88}
+.save-dot.pulse{animation:pulse .9s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+.save-backup-btn{font-size:11px;padding:4px 10px;border-radius:6px;border:none;cursor:pointer;font-weight:700;white-space:nowrap}
+/* ── Backup warning banner ── */
+#backup-banner{display:none;background:#2a1500;border-bottom:1px solid #5a3000;padding:9px 16px;align-items:center;gap:10px;flex-shrink:0}
+#backup-banner.show{display:flex}
+.backup-banner-text{flex:1;font-size:12px;color:#f0a500;line-height:1.4}
+.backup-banner-btn{background:#f0a500;border:none;color:#000;padding:7px 12px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;flex-shrink:0}
+.backup-banner-close{background:none;border:none;color:#666;cursor:pointer;font-size:18px;padding:0;flex-shrink:0}
+/* ── Toast ── */
+#toast{position:fixed;bottom:calc(86px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(12px);background:#222233;border:1px solid #3e3e55;color:#f0ede8;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:600;z-index:400;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;white-space:nowrap;max-width:90vw;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
 </head>
 <body>
@@ -126,6 +142,26 @@ body{padding-top:env(safe-area-inset-top)}
       <button class="icon-btn" id="cats-btn" style="display:none" onclick="openManageCats()">⚙ Cats</button>
       <button class="icon-btn" onclick="openDataSheet()" style="color:#5b8dee;border-color:#5b8dee40;background:#5b8dee15">⇅ Sync</button>
     </div>
+  </div>
+
+  <!-- Save status bar -->
+  <div id="save-bar">
+    <div class="save-status">
+      <div class="save-dot" id="save-dot"></div>
+      <span id="save-label">Saved</span>
+    </div>
+    <button class="save-backup-btn" id="save-backup-btn"
+      onclick="dlFullBackup()"
+      style="background:#4caf8820;color:#4caf88;border:1px solid #4caf8840">
+      ⬇ Save Backup
+    </button>
+  </div>
+
+  <!-- Backup overdue warning banner -->
+  <div id="backup-banner">
+    <div class="backup-banner-text" id="backup-banner-text"></div>
+    <button class="backup-banner-btn" onclick="dlFullBackup();dismissBanner()">Back Up Now</button>
+    <button class="backup-banner-close" onclick="dismissBanner()">✕</button>
   </div>
 
   <div id="content">
@@ -171,6 +207,9 @@ body{padding-top:env(safe-area-inset-top)}
   </div>
 </div>
 
+<!-- Toast notification -->
+<div id="toast"></div>
+
 <div id="sheet-overlay" onclick="sheetOverlayTap(event)">
   <div id="sheet">
     <div class="sheet-handle"><div class="sheet-handle-bar"></div></div>
@@ -206,7 +245,7 @@ let S = {
   filters:{date:td(),month:tdM(),year:tdY(),invMonth:tdM(),invYear:tdY(),ovMonth:tdM(),ovYear:tdY()},
 };
 
-// Load from localStorage
+// ─── Load from localStorage ───────────────────────────────────────────────────
 try{const s=JSON.parse(localStorage.getItem("mm2")||"{}");
   if(s.categories)S.categories=s.categories;
   if(s.expenses)S.expenses=s.expenses;
@@ -214,8 +253,103 @@ try{const s=JSON.parse(localStorage.getItem("mm2")||"{}");
   if(s.knownInvNames)S.knownInvNames=s.knownInvNames;
 }catch(e){}
 
+// ─── Save / Persist ───────────────────────────────────────────────────────────
+let _saveTimer=null;
+let _entriesSinceBackup=0;
+const BACKUP_REMINDER_DAYS=7;
+const BACKUP_REMINDER_ENTRIES=5;
+
 function persist(){
-  try{localStorage.setItem("mm2",JSON.stringify({categories:S.categories,expenses:S.expenses,investments:S.investments,knownInvNames:S.knownInvNames}));}catch(e){}
+  // Flash dot to "saving"
+  const dot=document.getElementById("save-dot");
+  const lbl=document.getElementById("save-label");
+  if(dot){dot.style.background="#f0a500";dot.classList.add("pulse");}
+  if(lbl)lbl.textContent="Saving…";
+
+  clearTimeout(_saveTimer);
+  _saveTimer=setTimeout(()=>{
+    try{
+      const payload={
+        categories:S.categories,expenses:S.expenses,
+        investments:S.investments,knownInvNames:S.knownInvNames,
+        lastSaved:Date.now(),
+      };
+      localStorage.setItem("mm2",JSON.stringify(payload));
+      setSaveStatus("saved");
+      _entriesSinceBackup++;
+      checkBackupReminder();
+    }catch(e){
+      setSaveStatus("error");
+      toast("⚠️ Save failed — storage may be full");
+    }
+  },400);
+}
+
+function setSaveStatus(state){
+  const dot=document.getElementById("save-dot");
+  const lbl=document.getElementById("save-label");
+  const btn=document.getElementById("save-backup-btn");
+  if(!dot)return;
+  dot.classList.remove("pulse");
+  if(state==="saved"){
+    dot.style.background="#4caf88";
+    if(lbl)lbl.textContent="Saved · "+fmtTime(Date.now());
+    if(btn){btn.style.background="#4caf8820";btn.style.color="#4caf88";btn.style.border="1px solid #4caf8840";}
+  } else if(state==="warn"){
+    dot.style.background="#f0a500";
+    if(lbl)lbl.textContent="Back up overdue";
+    if(btn){btn.style.background="#f0a50020";btn.style.color="#f0a500";btn.style.border="1px solid #f0a50060";}
+  } else if(state==="error"){
+    dot.style.background="#e05c7a";
+    if(lbl)lbl.textContent="Save failed!";
+  }
+}
+
+function fmtTime(ts){
+  const d=new Date(ts);
+  const now=new Date();
+  if(d.toDateString()===now.toDateString()){
+    return d.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"});
+  }
+  return d.toLocaleDateString("en-IN",{day:"numeric",month:"short"});
+}
+
+function checkBackupReminder(){
+  const lastBackup=parseInt(localStorage.getItem("mm2_last_backup")||"0");
+  const daysSince=lastBackup?(Date.now()-lastBackup)/86400000:999;
+  const banner=document.getElementById("backup-banner");
+  const bannerText=document.getElementById("backup-banner-text");
+  const dismissed=localStorage.getItem("mm2_banner_dismissed");
+  // Reset dismiss if conditions are freshly triggered
+  if(_entriesSinceBackup>=BACKUP_REMINDER_ENTRIES||daysSince>=BACKUP_REMINDER_DAYS){
+    if(dismissed!=="true"||_entriesSinceBackup>=BACKUP_REMINDER_ENTRIES*2){
+      let msg="";
+      if(daysSince>=BACKUP_REMINDER_DAYS&&lastBackup)
+        msg=`⚠️ No backup in ${Math.floor(daysSince)} days. Save a backup to avoid losing data.`;
+      else if(!lastBackup)
+        msg="💡 You haven't backed up yet. Download a backup so your data is safe.";
+      else
+        msg=`💡 You've added ${_entriesSinceBackup} entries since your last backup.`;
+      if(banner&&bannerText){bannerText.textContent=msg;banner.classList.add("show");}
+      setSaveStatus("warn");
+    }
+  }
+}
+
+function dismissBanner(){
+  const b=document.getElementById("backup-banner");
+  if(b)b.classList.remove("show");
+  localStorage.setItem("mm2_banner_dismissed","true");
+}
+
+// ─── Toast ────────────────────────────────────────────────────────────────────
+let _toastTimer=null;
+function toast(msg,duration=2600){
+  const t=document.getElementById("toast");
+  if(!t)return;
+  t.textContent=msg;t.classList.add("show");
+  clearTimeout(_toastTimer);
+  _toastTimer=setTimeout(()=>t.classList.remove("show"),duration);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -231,6 +365,13 @@ function totalI(){return S.investments.reduce((a,i)=>a+i.amount,0);}
 function empty(msg="Nothing here yet."){return`<div class="empty"><div class="empty-icon">📭</div><div class="empty-text">${msg}</div></div>`;}
 function storageUsed(){
   try{const s=localStorage.getItem("mm2")||"";return(s.length*2/1024).toFixed(1)+" KB";}catch{return"N/A";}
+}
+function lastSavedTime(){
+  try{const s=JSON.parse(localStorage.getItem("mm2")||"{}");return s.lastSaved?fmtTime(s.lastSaved):"Never";}catch{return"Unknown";}
+}
+function lastBackupTime(){
+  const t=parseInt(localStorage.getItem("mm2_last_backup")||"0");
+  return t?fmtTime(t):"Never";
 }
 
 // ─── Section ──────────────────────────────────────────────────────────────────
@@ -523,6 +664,14 @@ function dlFullBackup(){
   XLSX.utils.book_append_sheet(wb,expWS,"Expenses");
   XLSX.utils.book_append_sheet(wb,invWS,"Investments");
   XLSX.writeFile(wb,`money_manager_backup_${new Date().toISOString().slice(0,10)}.xlsx`);
+  // Record backup
+  localStorage.setItem("mm2_last_backup",String(Date.now()));
+  localStorage.removeItem("mm2_banner_dismissed");
+  _entriesSinceBackup=0;
+  setSaveStatus("saved");
+  const banner=document.getElementById("backup-banner");
+  if(banner)banner.classList.remove("show");
+  toast("✅ Backup saved to your device!");
 }
 
 // ─── Excel Import ─────────────────────────────────────────────────────────────
@@ -587,59 +736,80 @@ function importXLSX(mode){
 
 // ─── Data / Sync Sheet ────────────────────────────────────────────────────────
 function openDataSheet(){
+  const lastBackup=parseInt(localStorage.getItem("mm2_last_backup")||"0");
+  const daysSince=lastBackup?Math.floor((Date.now()-lastBackup)/86400000):null;
+  const backupStatus=!lastBackup
+    ? `<span style="color:#e05c7a;font-weight:700">Never backed up ⚠️</span>`
+    : daysSince===0
+      ? `<span style="color:#4caf88;font-weight:700">Today ✓</span>`
+      : daysSince<=3
+        ? `<span style="color:#4caf88;font-weight:700">${daysSince} day${daysSince>1?"s":""} ago ✓</span>`
+        : `<span style="color:#f0a500;font-weight:700">${daysSince} days ago ⚠</span>`;
+
   openSheet("⇅ Data & Sync",`
-    <div class="info-box">
-      <div class="info-box-title">💾 Where is your data stored?</div>
-      <div class="info-box-text">
-        Your data lives in your <strong>browser's localStorage</strong> on this specific device.<br><br>
-        • <strong>This browser, this device</strong> = data is here<br>
-        • Different browser or device = separate, empty data<br>
-        • Clearing browser data / cache = data is lost<br><br>
-        <strong>Storage used:</strong> ~${storageUsed()} of ~5 MB available
+
+    <!-- Save Status Card -->
+    <div style="background:#0f1a0f;border:1px solid #2e4a2e;border-radius:14px;padding:16px;margin-bottom:14px">
+      <div style="font-size:13px;font-weight:700;color:#4caf88;margin-bottom:10px">💾 Auto-Save Status</div>
+      <div class="storage-row"><span class="storage-label">Auto-saved to browser</span><span class="storage-value" style="color:#4caf88">${lastSavedTime()}</span></div>
+      <div class="storage-row"><span class="storage-label">Last device backup</span><span class="storage-value">${backupStatus}</span></div>
+      <div class="storage-row"><span class="storage-label">Entries since backup</span><span class="storage-value" style="color:${_entriesSinceBackup>=5?"#f0a500":"#f0ede8"}">${_entriesSinceBackup}</span></div>
+      <div class="storage-row"><span class="storage-label">Storage used</span><span class="storage-value">${storageUsed()} / ~5 MB</span></div>
+      <div style="margin-top:12px;padding:10px;background:#1a2a1a;border-radius:10px;font-size:12px;color:#888;line-height:1.6">
+        ✅ Every entry you add is <strong style="color:#4caf88">auto-saved instantly</strong> to this browser.<br>
+        ⚠️ This is wiped if you clear browser storage — always keep a backup file.
       </div>
     </div>
 
-    <div class="warn-box">
-      <div class="warn-box-title">🔄 How to sync between mobile & desktop</div>
-      <div class="warn-box-text">
-        1. Tap <strong>"Download Full Backup"</strong> on your current device<br>
-        2. Send the .xlsx file to your other device (WhatsApp, email, iCloud, Google Drive)<br>
-        3. Open the app on the other device → tap <strong>"Import & Merge"</strong><br>
-        4. Select the .xlsx file — your data will sync!
-      </div>
-    </div>
-
+    <!-- Where is data stored -->
     <div class="data-section">
-      <div class="data-section-title">📤 Export / Backup</div>
-      <div class="data-section-desc">Download all your data as a single Excel file with two sheets (Expenses + Investments). Use this to back up or sync to another device.</div>
-      <button class="data-action-btn" style="background:#5b8dee;color:#fff" onclick="dlFullBackup()">
-        <span>⬇</span> Download Full Backup (.xlsx)
-      </button>
-    </div>
-
-    <div class="data-section">
-      <div class="data-section-title">📥 Import / Restore</div>
-      <div class="data-section-desc">Import a backup Excel file. <strong>Merge</strong> adds new entries without removing existing ones. <strong>Replace</strong> wipes current data and loads the file.</div>
-      <button class="data-action-btn" style="background:#4caf88;color:#fff" onclick="importXLSX('merge')">
-        <span>⇅</span> Import & Merge
-      </button>
-      <button class="data-action-btn" style="background:#2e2e3e;color:#e05c7a;border:1px solid #e05c7a30" onclick="confirmReplace()">
-        <span>⚠</span> Import & Replace All Data
-      </button>
-    </div>
-
-    <div class="data-section">
-      <div class="data-section-title">📊 Current Data Summary</div>
+      <div class="data-section-title">📍 Where is data stored?</div>
+      <div class="storage-row"><span class="storage-label">Live data location</span><span class="storage-value">Browser localStorage</span></div>
       <div class="storage-row"><span class="storage-label">Total Expenses</span><span class="storage-value">${S.expenses.length} entries · ${fmt(totalE())}</span></div>
       <div class="storage-row"><span class="storage-label">Total Investments</span><span class="storage-value">${S.investments.length} entries · ${fmt(totalI())}</span></div>
-      <div class="storage-row"><span class="storage-label">Storage location</span><span class="storage-value">Browser localStorage</span></div>
-      <div class="storage-row"><span class="storage-label">Storage used</span><span class="storage-value">${storageUsed()}</span></div>
-      <div class="storage-row"><span class="storage-label">Last updated</span><span class="storage-value">${new Date().toLocaleDateString("en-IN")}</span></div>
+      <div style="margin-top:12px;font-size:12px;color:#666;line-height:1.6">
+        • <strong style="color:#f0ede8">This browser only</strong> — data doesn't sync automatically<br>
+        • Different browser or device = separate empty data<br>
+        • Clearing browser cache = data gone (use backup!)
+      </div>
     </div>
 
+    <!-- Export -->
+    <div class="data-section">
+      <div class="data-section-title">📤 Save Backup to Device</div>
+      <div class="data-section-desc">Downloads a .xlsx file with all your data. Store it in Google Drive, iCloud, or WhatsApp yourself for safekeeping.</div>
+      <button class="data-action-btn" style="background:#5b8dee;color:#fff" onclick="dlFullBackup()">
+        ⬇ Download Full Backup (.xlsx)
+      </button>
+    </div>
+
+    <!-- Sync instructions -->
+    <div class="warn-box" style="margin-bottom:14px">
+      <div class="warn-box-title">🔄 How to sync Mobile ↔ Desktop</div>
+      <div class="warn-box-text" style="line-height:1.8">
+        1. Tap <strong style="color:#f0a500">"Download Full Backup"</strong> on Device A<br>
+        2. Send .xlsx via WhatsApp / email / Google Drive to Device B<br>
+        3. Open app on Device B → tap <strong style="color:#f0a500">"Import & Merge"</strong><br>
+        4. Select the file — data synced ✅
+      </div>
+    </div>
+
+    <!-- Import -->
+    <div class="data-section">
+      <div class="data-section-title">📥 Import / Restore from Backup</div>
+      <div class="data-section-desc"><strong>Merge</strong> adds new entries on top of existing ones (recommended). <strong>Replace</strong> wipes all current data first.</div>
+      <button class="data-action-btn" style="background:#4caf88;color:#fff" onclick="importXLSX('merge')">
+        ⇅ Import & Merge
+      </button>
+      <button class="data-action-btn" style="background:#2e2e3e;color:#e05c7a;border:1px solid #e05c7a30" onclick="confirmReplace()">
+        ⚠ Import & Replace All Data
+      </button>
+    </div>
+
+    <!-- Danger -->
     <div class="data-section">
       <div class="data-section-title" style="color:#e05c7a">🗑 Danger Zone</div>
-      <div class="data-section-desc">Permanently delete all data from this device. This cannot be undone — download a backup first.</div>
+      <div class="data-section-desc">Permanently deletes all data on this device. Cannot be undone. Download a backup first.</div>
       <button class="data-action-btn" style="background:#2e2e3e;color:#e05c7a;border:1px solid #e05c7a40" onclick="confirmClearAll()">
         Clear All Data on This Device
       </button>
@@ -718,6 +888,7 @@ function submitExp(){
     subcategory:document.getElementById("ef-sub").value,amount:amt,
     description:document.getElementById("ef-desc").value});
   persist();updateHeader();closeSheet();renderExp();
+  toast("✅ Expense added & saved");
 }
 
 // ─── Add Investment ───────────────────────────────────────────────────────────
@@ -766,6 +937,7 @@ function submitInv(){
     type:document.getElementById("if-type").value,name,amount:amt,
     description:document.getElementById("if-desc").value});
   persist();updateHeader();closeSheet();renderInv();
+  toast("✅ Investment added & saved");
 }
 
 // ─── Manage Categories ────────────────────────────────────────────────────────
@@ -813,6 +985,35 @@ function saveCats(){S.categories=JSON.parse(JSON.stringify(tCats));persist();clo
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 setSection("expenses");
+// Show saved time from last session
+const _ls=JSON.parse(localStorage.getItem("mm2")||"{}");
+if(_ls.lastSaved){
+  const dot=document.getElementById("save-dot");
+  const lbl=document.getElementById("save-label");
+  if(dot)dot.style.background="#4caf88";
+  if(lbl)lbl.textContent="Saved · "+fmtTime(_ls.lastSaved);
+}
+// Check if backup is overdue on load
+setTimeout(()=>{
+  const lastBackup=parseInt(localStorage.getItem("mm2_last_backup")||"0");
+  const daysSince=lastBackup?(Date.now()-lastBackup)/86400000:999;
+  const banner=document.getElementById("backup-banner");
+  const bannerText=document.getElementById("backup-banner-text");
+  const dismissed=localStorage.getItem("mm2_banner_dismissed");
+  if(dismissed==="true")return;
+  if(!lastBackup&&(S.expenses.length+S.investments.length)>0){
+    if(banner&&bannerText){
+      bannerText.textContent="💡 You have "+(S.expenses.length+S.investments.length)+" entries but no backup yet. Tap to save one.";
+      banner.classList.add("show");
+    }
+  } else if(daysSince>=BACKUP_REMINDER_DAYS){
+    if(banner&&bannerText){
+      bannerText.textContent="⚠️ Last backup was "+Math.floor(daysSince)+" days ago. Back up to keep your data safe.";
+      banner.classList.add("show");
+      setSaveStatus("warn");
+    }
+  }
+},800);
 </script>
 </body>
 </html>
